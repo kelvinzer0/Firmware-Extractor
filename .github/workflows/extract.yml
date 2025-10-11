@@ -28,11 +28,10 @@ jobs:
         with:
           python-version: '3.x'
           
-      - name: Install Dependencies
+      - name: Install Dependencies via Setup Script
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-pip unzip tar gzip brotli
-          pip3 install -r requirements.txt
+          chmod +x setup.sh
+          ./setup.sh
           
       - name: Download Firmware
         run: |
