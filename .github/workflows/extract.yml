@@ -1,0 +1,134 @@
+name: Firmware Extractor & Uploader
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_url:
+        description: 'URL Firmware (zip/tgz/fastboot)'
+        required: true
+        type: string
+      upload_url:
+        description: 'URL Upload Script (default: https://oshi.at)'
+        required: false
+        default: 'https://oshi.at'
+        type: string
+
+jobs:
+  extract-and-upload:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Maximize Build Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          
+      - name: Checkout DumprX
+        uses: actions/checkout@v4
+        with:
+          repository: DumprX/DumprX
+          
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip unzip tar gzip brotli
+          pip3 install -r requirements.txt
+          
+      - name: Download Firmware
+        run: |
+          echo "Downloading firmware from: ${{ inputs.firmware_url }}"
+          wget -O firmware.zip "${{ inputs.firmware_url }}" || \
+          curl -L -o firmware.zip "${{ inputs.firmware_url }}"
+          
+      - name: Extract Firmware with DumprX
+        run: |
+          chmod +x dumper.sh
+          ./dumper.sh firmware.zip
+          
+      - name: Find Extracted Images
+        id: find_images
+        run: |
+          # DumprX extract ke direktori out/
+          EXTRACT_DIR="out"
+          echo "extract_dir=$EXTRACT_DIR" >> $GITHUB_OUTPUT
+          
+          if [ ! -d "$EXTRACT_DIR" ]; then
+            echo "Tidak ditemukan direktori hasil ekstraksi"
+            exit 1
+          fi
+          
+          echo "Direktori ekstraksi: $EXTRACT_DIR"
+          ls -lah "$EXTRACT_DIR"
+          
+      - name: Upload Images
+        run: |
+          EXTRACT_DIR="${{ steps.find_images.outputs.extract_dir }}"
+          UPLOAD_URL="${{ inputs.upload_url }}"
+          
+          # File-file penting untuk TWRP building dari DumprX
+          IMAGES=("boot.img" "recovery.img" "vendor_boot.img" "dtbo.img" "vbmeta.img" "system.img" "vendor.img")
+          
+          echo "=== Uploading Important Images ==="
+          
+          for img in "${IMAGES[@]}"; do
+            if [ -f "$EXTRACT_DIR/$img" ]; then
+              echo "Uploading $img..."
+              # Upload dengan format: curl -T file upload_url/filename
+              curl -T "$EXTRACT_DIR/$img" "$UPLOAD_URL" || \
+              curl --upload-file "$EXTRACT_DIR/$img" "$UPLOAD_URL/$img"
+              echo "✓ $img uploaded"
+            else
+              echo "⚠ $img not found, skipping..."
+            fi
+          done
+          
+          # Upload semua file .img lainnya di direktori root
+          echo ""
+          echo "=== Uploading Other Images ==="
+          find "$EXTRACT_DIR" -maxdepth 1 -name "*.img" -type f | while read imgfile; do
+            filename=$(basename "$imgfile")
+            # Skip jika sudah diupload
+            if [[ ! " ${IMAGES[@]} " =~ " ${filename} " ]]; then
+              echo "Uploading $filename..."
+              curl -T "$imgfile" "$UPLOAD_URL" || \
+              curl --upload-file "$imgfile" "$UPLOAD_URL/$filename"
+              echo "✓ $filename uploaded"
+            fi
+          done
+          
+          # Upload boot/kernel untuk TWRP (dari boot/ subfolder)
+          echo ""
+          echo "=== Uploading Boot Components ==="
+          if [ -d "$EXTRACT_DIR/boot" ]; then
+            for bootfile in kernel ramdisk.cpio; do
+              if [ -f "$EXTRACT_DIR/boot/$bootfile" ]; then
+                echo "Uploading boot/$bootfile..."
+                curl -T "$EXTRACT_DIR/boot/$bootfile" "$UPLOAD_URL" || \
+                curl --upload-file "$EXTRACT_DIR/boot/$bootfile" "$UPLOAD_URL/$bootfile"
+                echo "✓ boot/$bootfile uploaded"
+              fi
+            done
+          fi
+          
+      - name: Summary
+        run: |
+          EXTRACT_DIR="${{ steps.find_images.outputs.extract_dir }}"
+          echo "## 📦 Extraction Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Main Images:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          find "$EXTRACT_DIR" -maxdepth 1 -name "*.img" -type f -exec basename {} \; | sort >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Boot Components:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          [ -d "$EXTRACT_DIR/boot" ] && ls "$EXTRACT_DIR/boot" >> $GITHUB_STEP_SUMMARY || echo "No boot directory found" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
